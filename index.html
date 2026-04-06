@@ -9,6 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Biblioteka">
   <title>Moja Biblioteka</title>
   <link rel="manifest" href="manifest.json">
+  <script src="https://unpkg.com/@zxing/browser@latest/umd/index.min.js"></script>
   <style>
     /* ===== RESET & BASE ===== */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1105,8 +1106,7 @@ let rating      = 0;
 let status      = 'want';
 let editId      = null;
 let camStream   = null;
-let scanner     = null;
-let scanTimer   = null;
+let zxingReader = null;
 
 /* ============================================================
    SUPABASE HELPERS
@@ -1558,46 +1558,42 @@ async function openCamModal() {
 async function startCam() {
   const hint = document.getElementById('camHint');
   try {
-    camStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment', width: { ideal: 1280 } }
-    });
-    const vid = document.getElementById('camVideo');
-    vid.srcObject = camStream;
+    if (!window.ZXingBrowser) throw new Error('ZXing not loaded');
 
-    if ('BarcodeDetector' in window) {
-      scanner = new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128'] });
-      hint.textContent = 'Nakieruj kamerę na kod kreskowy ISBN';
-      scanTimer = setInterval(() => scanFrame(vid), 400);
-    } else {
-      hint.textContent = 'Skaner niedostępny — użyj pola tekstowego lub wgraj zdjęcie';
-    }
-  } catch {
+    zxingReader = new ZXingBrowser.BrowserMultiFormatReader();
+    hint.textContent = 'Nakieruj kamerę na kod kreskowy ISBN';
+
+    await zxingReader.decodeFromConstraints(
+      { video: { facingMode: 'environment', width: { ideal: 1280 } } },
+      document.getElementById('camVideo'),
+      (result, err, controls) => {
+        if (result) {
+          const isbn = result.getText();
+          controls.stop();
+          camStream = null;
+          closeOverlay('camOverlay');
+          openAdd();
+          document.getElementById('gSearchIn').value = isbn;
+          document.getElementById('gSearchBtn').click();
+          toast(`Wykryto: ${isbn}`, 'info');
+        }
+      }
+    );
+  } catch (e) {
     hint.textContent = 'Brak dostępu do kamery — użyj pola tekstowego';
     document.getElementById('camVideo').style.display = 'none';
+    console.error('startCam:', e);
   }
 }
 
-async function scanFrame(video) {
-  if (!scanner || video.readyState < 2) return;
-  try {
-    const codes = await scanner.detect(video);
-    if (codes.length) {
-      const isbn = codes[0].rawValue;
-      stopCam();
-      closeOverlay('camOverlay');
-      openAdd();
-      document.getElementById('gSearchIn').value = isbn;
-      document.getElementById('gSearchBtn').click();
-      toast(`Wykryto: ${isbn}`, 'info');
-    }
-  } catch {}
-}
-
 function stopCam() {
-  if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
+  if (zxingReader) {
+    try { zxingReader.reset(); } catch {}
+    zxingReader = null;
+  }
   if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
   const vid = document.getElementById('camVideo');
-  vid.srcObject = null;
+  if (vid) vid.srcObject = null;
 }
 
 /* ============================================================
@@ -1608,26 +1604,26 @@ document.getElementById('camFileIn').addEventListener('change', async e => {
   if (!file) return;
   e.target.value = '';
 
-  // Try barcode detection on the image
-  if ('BarcodeDetector' in window) {
-    try {
-      const bmp = await createImageBitmap(file);
-      const det = scanner || new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128'] });
-      const codes = await det.detect(bmp);
-      if (codes.length) {
-        const isbn = codes[0].rawValue;
-        stopCam();
-        closeOverlay('camOverlay');
-        openAdd();
-        document.getElementById('gSearchIn').value = isbn;
-        document.getElementById('gSearchBtn').click();
-        toast(`Wykryto ISBN: ${isbn}`, 'info');
-        return;
-      }
-    } catch {}
-  }
+  try {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.src = url;
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; });
 
-  toast('Nie wykryto kodu — wpisz tytuł lub ISBN ręcznie', 'info');
+    const reader = new ZXingBrowser.BrowserMultiFormatReader();
+    const result = await reader.decodeFromImageElement(img);
+    URL.revokeObjectURL(url);
+
+    const isbn = result.getText();
+    stopCam();
+    closeOverlay('camOverlay');
+    openAdd();
+    document.getElementById('gSearchIn').value = isbn;
+    document.getElementById('gSearchBtn').click();
+    toast(`Wykryto ISBN: ${isbn}`, 'info');
+  } catch {
+    toast('Nie wykryto kodu — wpisz tytuł lub ISBN ręcznie', 'info');
+  }
 });
 
 /* ============================================================
