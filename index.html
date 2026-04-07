@@ -1107,6 +1107,7 @@ let status      = 'want';
 let editId      = null;
 let camStream   = null;
 let zxingReader = null;
+let scanTimer   = null;
 
 /* ============================================================
    SUPABASE HELPERS
@@ -1149,28 +1150,48 @@ const removeBook = async (id) => {
 };
 
 /* ============================================================
-   GOOGLE BOOKS
+   OPEN LIBRARY API
 ============================================================ */
 async function gBooks(q) {
-  const r = await fetch(
-    `https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=10`
-  );
+  // Jeśli wygląda jak ISBN — szukaj po ISBN
+  const isIsbn = /^[\d\-]{9,}$/.test(q.replace(/\s/g, ''));
+  const url = isIsbn
+    ? `https://openlibrary.org/api/books?bibkeys=ISBN:${encodeURIComponent(q)}&format=json&jscmd=data`
+    : `https://openlibrary.org/search.json?q=${encodeURIComponent(q)}&limit=10`;
+  const r = await fetch(url);
   const d = await r.json();
-  return d.items || [];
+  if (isIsbn) {
+    const key = Object.keys(d)[0];
+    return key ? [d[key]] : [];
+  }
+  return d.docs || [];
 }
 
 function parseBook(item) {
-  const v = item.volumeInfo || {};
-  const il = v.imageLinks || {};
-  const cover = (il.thumbnail || il.smallThumbnail || '').replace('http:', 'https:');
-  const idents = v.industryIdentifiers || [];
-  const isbn = (idents.find(i => i.type === 'ISBN_13') || idents.find(i => i.type === 'ISBN_10') || {}).identifier || '';
+  // Format ISBN lookup (jscmd=data) — pola płaskie z okładką przez id
+  if (item.title && (item.authors || item.cover)) {
+    const authors = (item.authors || []).map(a => a.name).join(', ');
+    const coverId = item.cover?.medium || item.cover?.large || item.cover?.small || '';
+    const isbns   = item.isbn_13 || item.isbn_10 || [];
+    return {
+      title:     item.title || '',
+      author:    authors,
+      genre:     (item.subjects || [])[0]?.name || '',
+      isbn:      isbns[0] || '',
+      cover_url: coverId
+    };
+  }
+  // Format search.json (docs[])
+  const cover_url = item.cover_i
+    ? `https://covers.openlibrary.org/b/id/${item.cover_i}-M.jpg`
+    : '';
+  const isbns = item.isbn || [];
   return {
-    title:     v.title || '',
-    author:    (v.authors || []).join(', '),
-    genre:     (v.categories || [])[0] || '',
-    isbn,
-    cover_url: cover
+    title:     item.title || '',
+    author:    (item.author_name || []).join(', '),
+    genre:     (item.subject || [])[0] || '',
+    isbn:      isbns.find(i => i.length === 13) || isbns[0] || '',
+    cover_url
   };
 }
 
@@ -1557,57 +1578,49 @@ async function openCamModal() {
 
 async function startCam() {
   const hint = document.getElementById('camHint');
-
-  // Czekaj aż ZXing załaduje się z CDN (maks. 3 s)
-  let attempts = 0;
-  while (!window.ZXingBrowser && attempts < 30) {
-    await new Promise(r => setTimeout(r, 100));
-    attempts++;
-  }
-  if (!window.ZXingBrowser) {
-    hint.textContent = 'Skaner niedostępny — użyj pola tekstowego lub wgraj zdjęcie';
-    console.error('startCam: ZXing not loaded');
-    return;
-  }
-
+  const vid  = document.getElementById('camVideo');
   try {
-    zxingReader = new ZXingBrowser.BrowserMultiFormatReader();
+    camStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment' }
+    });
+    vid.srcObject = camStream;
+    await vid.play();
     hint.textContent = 'Nakieruj kamerę na kod kreskowy ISBN';
 
-    await zxingReader.decodeFromConstraints(
-      { video: { facingMode: 'environment', width: { ideal: 1280 } } },
-      document.getElementById('camVideo'),
-      (result, err, controls) => {
+    // Pętla skanowania co 600 ms przez canvas — działa na Safari iOS
+    const canvas = document.createElement('canvas');
+    const ctx    = canvas.getContext('2d');
+    scanTimer = setInterval(async () => {
+      if (vid.readyState < 2) return;
+      canvas.width  = vid.videoWidth;
+      canvas.height = vid.videoHeight;
+      ctx.drawImage(vid, 0, 0);
+      try {
+        const reader = new ZXingBrowser.BrowserMultiFormatReader();
+        const result = await reader.decodeFromCanvas(canvas);
         if (result) {
+          clearInterval(scanTimer); scanTimer = null;
           const isbn = result.getText();
-          controls.stop();
-          camStream = null;
+          stopCam();
           closeOverlay('camOverlay');
           openAdd();
           document.getElementById('gSearchIn').value = isbn;
           document.getElementById('gSearchBtn').click();
-          toast(`Wykryto: ${isbn}`, 'info');
+          toast('Wykryto: ' + isbn, 'info');
         }
-      }
-    );
-
-    // Zachowaj referencję do streamu żeby stopCam() mógł go zatrzymać
-    const vid = document.getElementById('camVideo');
-    if (vid && vid.srcObject) camStream = vid.srcObject;
-
+      } catch {}
+    }, 600);
   } catch (e) {
-    hint.textContent = 'Brak dostępu do kamery — użyj pola tekstowego';
-    document.getElementById('camVideo').style.display = 'none';
+    hint.textContent = 'Brak dostępu do kamery';
+    vid.style.display = 'none';
     console.error('startCam:', e);
   }
 }
 
 function stopCam() {
-  if (zxingReader) {
-    try { zxingReader.reset(); } catch {}
-    zxingReader = null;
-  }
-  if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
+  if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
+  if (zxingReader) { try { zxingReader.reset(); } catch {} zxingReader = null; }
+  if (camStream)  { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
   const vid = document.getElementById('camVideo');
   if (vid) vid.srcObject = null;
 }
