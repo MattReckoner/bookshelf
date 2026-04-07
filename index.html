@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-title" content="Biblioteka">
   <title>Moja Biblioteka</title>
   <link rel="manifest" href="manifest.json">
-  <script src="https://unpkg.com/@zxing/browser@latest/umd/index.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/index.min.js"></script>
   <style>
     /* ===== RESET & BASE ===== */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1557,9 +1557,20 @@ async function openCamModal() {
 
 async function startCam() {
   const hint = document.getElementById('camHint');
-  try {
-    if (!window.ZXingBrowser) throw new Error('ZXing not loaded');
 
+  // Czekaj aż ZXing załaduje się z CDN (maks. 3 s)
+  let attempts = 0;
+  while (!window.ZXingBrowser && attempts < 30) {
+    await new Promise(r => setTimeout(r, 100));
+    attempts++;
+  }
+  if (!window.ZXingBrowser) {
+    hint.textContent = 'Skaner niedostępny — użyj pola tekstowego lub wgraj zdjęcie';
+    console.error('startCam: ZXing not loaded');
+    return;
+  }
+
+  try {
     zxingReader = new ZXingBrowser.BrowserMultiFormatReader();
     hint.textContent = 'Nakieruj kamerę na kod kreskowy ISBN';
 
@@ -1579,6 +1590,11 @@ async function startCam() {
         }
       }
     );
+
+    // Zachowaj referencję do streamu żeby stopCam() mógł go zatrzymać
+    const vid = document.getElementById('camVideo');
+    if (vid && vid.srcObject) camStream = vid.srcObject;
+
   } catch (e) {
     hint.textContent = 'Brak dostępu do kamery — użyj pola tekstowego';
     document.getElementById('camVideo').style.display = 'none';
